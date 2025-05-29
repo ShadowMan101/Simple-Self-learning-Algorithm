@@ -2,4 +2,4 @@ Self learning Algorithm's That Perform Tasks Like learning the Numbers from 0 to
 
 
 
-Make Sure to Run This In Command Line In Windows Only
+Make Sure to Run This In Windows Only
