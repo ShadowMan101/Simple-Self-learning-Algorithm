@@ -1,210 +1,281 @@
+// Letter-learning neural network with clean output and logging
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <math.h>
 #include <time.h>
-#include <signal.h>
-#include <stdbool.h>
+#include <string.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
+#define INPUT_SIZE 5
+#define HIDDEN_SIZE 24
+#define OUTPUT_SIZE 26
+#define POPULATION_SIZE 50
+#define TOURNAMENT_SIZE 6
+#define MUTATION_RATE 0.1f
+#define MAX_TARGET 25
+#define STALL_LIMIT 500
 
-#define POPULATION_SIZE 20      // Increased population size
-#define INPUT_SIZE 26          // Changed to 26 for the alphabet (a to z)
-#define MUTATION_RATE 0.05      // Adjusted mutation rate
-#define TOURNAMENT_SIZE 5      // Increased tournament size
-#define ELITE_COUNT 2           // Number of elite individuals to preserve
+float learning_decay = 0.2f;
 
 typedef struct {
-    char genes[INPUT_SIZE];
-    int fitness;
+    float input_hidden[INPUT_SIZE][HIDDEN_SIZE];
+    float hidden_output[HIDDEN_SIZE][OUTPUT_SIZE];
+} Network;
+
+typedef struct {
+    Network net;
+    float fitness;
 } Individual;
 
-void generateRandomGenes(char genes[INPUT_SIZE]) {
-    for (int i = 0; i < INPUT_SIZE; ++i) {
-        genes[i] = rand() % 2 ? '0' : '1';
+void int_to_binary(int n, int* out) {
+    for (int i = 0; i < INPUT_SIZE; ++i)
+        out[INPUT_SIZE - 1 - i] = (n >> i) & 1;
+}
+
+float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+float random_weight() {
+    return ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+}
+
+void forward(Network* net, int* input, float* output) {
+    float hidden[HIDDEN_SIZE] = {0};
+
+    for (int h = 0; h < HIDDEN_SIZE; ++h) {
+        for (int i = 0; i < INPUT_SIZE; ++i)
+            hidden[h] += input[i] * net->input_hidden[i][h];
+        hidden[h] = sigmoid(hidden[h]);
+    }
+
+    for (int o = 0; o < OUTPUT_SIZE; ++o) {
+        output[o] = 0;
+        for (int h = 0; h < HIDDEN_SIZE; ++h)
+            output[o] += hidden[h] * net->hidden_output[h][o];
+        output[o] = sigmoid(output[o]);
     }
 }
 
-int calculateFitness(char genes[INPUT_SIZE]) {
-    int fitness = 0;
-    for (int i = 0; i < INPUT_SIZE; ++i) {
-        fitness += (genes[i] == '1') ? i : 0;
+float evaluate(Network* net, int max_class) {
+    float fitness = 0.0f;
+    float output[OUTPUT_SIZE];
+    int input[INPUT_SIZE];
+
+    for (int i = 0; i <= max_class; ++i) {
+        int_to_binary(i, input);
+        forward(net, input, output);
+
+        int max_index = 0;
+        for (int j = 1; j <= max_class; ++j)
+            if (output[j] > output[max_index])
+                max_index = j;
+
+        if (max_index == i)
+            fitness += 2.0f;
+        else
+            fitness += 1.0f - fabsf((float)i - max_index) / (max_class + 1);
+
+        fitness += output[i];
     }
+
     return fitness;
 }
 
-void mutate(char genes[INPUT_SIZE]) {
-    for (int i = 0; i < INPUT_SIZE; ++i) {
-        if ((rand() / (double)RAND_MAX) < MUTATION_RATE) {
-            genes[i] = (genes[i] == '0') ? '1' : '0';
-        }
+int is_perfect(Network* net, int max_class) {
+    float output[OUTPUT_SIZE];
+    int input[INPUT_SIZE];
+
+    for (int i = 0; i <= max_class; ++i) {
+        int_to_binary(i, input);
+        forward(net, input, output);
+
+        int max_index = 0;
+        for (int j = 1; j <= max_class; ++j)
+            if (output[j] > output[max_index])
+                max_index = j;
+
+        if (max_index != i)
+            return 0;
+    }
+    return 1;
+}
+
+void mutate(Network* net, float rate) {
+    for (int i = 0; i < INPUT_SIZE; ++i)
+        for (int h = 0; h < HIDDEN_SIZE; ++h)
+            if ((float)rand() / RAND_MAX < MUTATION_RATE)
+                net->input_hidden[i][h] += random_weight() * rate;
+
+    for (int h = 0; h < HIDDEN_SIZE; ++h)
+        for (int o = 0; o < OUTPUT_SIZE; ++o)
+            if ((float)rand() / RAND_MAX < MUTATION_RATE)
+                net->hidden_output[h][o] += random_weight() * rate;
+}
+
+void crossover(Network* child, Network* parent1, Network* parent2) {
+    for (int i = 0; i < INPUT_SIZE; ++i)
+        for (int h = 0; h < HIDDEN_SIZE; ++h)
+            child->input_hidden[i][h] = (rand() % 2) ? parent1->input_hidden[i][h] : parent2->input_hidden[i][h];
+
+    for (int h = 0; h < HIDDEN_SIZE; ++h)
+        for (int o = 0; o < OUTPUT_SIZE; ++o)
+            child->hidden_output[h][o] = (rand() % 2) ? parent1->hidden_output[h][o] : parent2->hidden_output[h][o];
+}
+
+void copy_network(Network* dest, Network* src) {
+    for (int i = 0; i < INPUT_SIZE; ++i)
+        for (int h = 0; h < HIDDEN_SIZE; ++h)
+            dest->input_hidden[i][h] = src->input_hidden[i][h];
+
+    for (int h = 0; h < HIDDEN_SIZE; ++h)
+        for (int o = 0; o < OUTPUT_SIZE; ++o)
+            dest->hidden_output[h][o] = src->hidden_output[h][o];
+}
+
+void reset_half_population(Individual* pop) {
+    for (int i = POPULATION_SIZE / 2; i < POPULATION_SIZE; ++i) {
+        for (int x = 0; x < INPUT_SIZE; ++x)
+            for (int y = 0; y < HIDDEN_SIZE; ++y)
+                pop[i].net.input_hidden[x][y] = random_weight();
+        for (int x = 0; x < HIDDEN_SIZE; ++x)
+            for (int y = 0; y < OUTPUT_SIZE; ++y)
+                pop[i].net.hidden_output[x][y] = random_weight();
     }
 }
 
-void crossover(Individual parent1, Individual parent2, Individual *child) {
-    int crossoverPoint = rand() % INPUT_SIZE;
-    for (int i = 0; i < crossoverPoint; ++i) {
-        child->genes[i] = parent1.genes[i];
-    }
-    for (int i = crossoverPoint; i < INPUT_SIZE; ++i) {
-        child->genes[i] = parent2.genes[i];
-    }
+void print_progress_bar(int current, int total) {
+    int width = 30;
+    int progress = (current * width) / total;
+    int percent = (current * 100) / total;
+
+    const char* color;
+    if (percent < 33) color = "\033[0;31m";
+    else if (percent < 66) color = "\033[0;33m";
+    else color = "\033[0;32m";
+
+    printf(" [");
+    printf("%s", color);
+    for (int i = 0; i < progress; ++i) printf("=");
+    printf("\033[0m");
+    for (int i = progress; i < width; ++i) printf(" ");
+    printf("] %3d%%", percent);
 }
 
-void printTime(double elapsedSeconds) {
-    int hours = (int)(elapsedSeconds / 3600);
-    int minutes = ((int)elapsedSeconds % 3600) / 60;
-    int seconds = ((int)elapsedSeconds % 3600) % 60;
-
-    printf("%02d:%02d:%02d", hours, minutes, seconds);
-}
-
-int compareIndividuals(const void *a, const void *b) {
-    return ((Individual *)b)->fitness - ((Individual *)a)->fitness;
-}
-
-void tournamentSelection(Individual population[POPULATION_SIZE], Individual tournament[TOURNAMENT_SIZE]) {
-    for (int i = 0; i < TOURNAMENT_SIZE; ++i) {
-        int randomIndex = rand() % POPULATION_SIZE;
-        tournament[i] = population[randomIndex];
-    }
-}
-
-bool checkCorrectOrder(Individual individual) {
-    for (int i = 0; i < INPUT_SIZE; ++i) {
-        if (individual.genes[i] != '1' || individual.fitness != i) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void writeLogFile(Individual population[POPULATION_SIZE], int generation, double elapsedSeconds) {
-    FILE *file = fopen("logAlphaNet.txt", "w");
-    if (file == NULL) {
-        perror("Error opening log file");
-        exit(EXIT_FAILURE);
-    }
-
-    fprintf(file, "Generation: %d\n", generation);
-    fprintf(file, "Elapsed Time: %f seconds\n", elapsedSeconds);
-
-    fprintf(file, "Best Individual:\n");
-    fprintf(file, "Genes: ");
-    for (int i = 0; i < INPUT_SIZE; ++i) {
-        fprintf(file, "%c", population[0].genes[i] == '1' ? 'a' + i : '-');
-    }
-    fprintf(file, "\nFitness: %d\n", population[0].fitness);
-
-    fclose(file);
-}
-
-void handleInterrupt(int signal) {
-    // Handle interrupt logic if needed
-}
-
-int interrupted = 0;
-
-void evolvePopulation(Individual population[POPULATION_SIZE], int *generation, clock_t *start, int targetFitness, int *learningFailed) {
-    qsort(population, POPULATION_SIZE, sizeof(Individual), compareIndividuals);
-
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
-
-    printf("\033[3A");
-    printf("\033[0;34m===================================================\n\033[0;36mAlphabet Learning Neural Network:\n\033[0;34m===================================================\n\n\r\033[K\033[1;33mGeneration:\033[1;37m %d ", *generation);
-
-    printf("\n\033[1;33mProgress: \033[1;37m");
-    for (int i = 0; i < INPUT_SIZE; ++i) {
-        printf("%c", population[0].genes[i] == '1' ? 'a' + i : '-');
-    }
-
-    clock_t now = clock();
-    double elapsedSeconds = (double)(now - *start) / CLOCKS_PER_SEC;
-
-    printf("\n\033[1;35mTime: \033[1;37m");
-    printTime(elapsedSeconds);
-    fflush(stdout);
-
-    // Preserve elite individuals
-    for (int i = 0; i < ELITE_COUNT; ++i) {
-        memcpy(population[i + ELITE_COUNT].genes, population[i].genes, INPUT_SIZE);
-        population[i + ELITE_COUNT].fitness = calculateFitness(population[i + ELITE_COUNT].genes);
-    }
-
-    // Generate new individuals using crossover and mutation
-    for (int i = ELITE_COUNT; i < POPULATION_SIZE; ++i) {
-        crossover(population[rand() % ELITE_COUNT], population[rand() % ELITE_COUNT], &population[i]);
-        mutate(population[i].genes);
-        population[i].fitness = calculateFitness(population[i].genes);
-    }
-
-    (*generation)++;
-
-    // Check if the correct order is reached
-    if (checkCorrectOrder(population[0])) {
-        printf("\n\033[1;32mSuccessfully Learned Alphabet at generation: %d\n", *generation - 1);
-        writeLogFile(population, *generation - 1, elapsedSeconds);
-        // Exit here if the correct order is reached
-        exit(EXIT_SUCCESS);
+void log_generation(const char* logline) {
+    FILE* f = fopen("generation_log.txt", "a");
+    if (f) {
+        fprintf(f, "%s\n", logline);
+        fclose(f);
     }
 }
 
 int main() {
-    system("title Alphabet Learning Neural Network");
-    signal(SIGINT, handleInterrupt);
-
-    srand(time(NULL));
+     printf("\033[0;34m=================================\n\033[0;36mAlphabet Learning Neural Network:\n\033[0;34m=================================\n\e[0;37m");
+    srand((unsigned int)time(NULL));
 
     Individual population[POPULATION_SIZE];
-
     for (int i = 0; i < POPULATION_SIZE; ++i) {
-        generateRandomGenes(population[i].genes);
-        population[i].fitness = calculateFitness(population[i].genes);
+        for (int x = 0; x < INPUT_SIZE; ++x)
+            for (int y = 0; y < HIDDEN_SIZE; ++y)
+                population[i].net.input_hidden[x][y] = random_weight();
+        for (int x = 0; x < HIDDEN_SIZE; ++x)
+            for (int y = 0; y < OUTPUT_SIZE; ++y)
+                population[i].net.hidden_output[x][y] = random_weight();
     }
 
-    int targetFitness = INPUT_SIZE;
-    int generation = 1;
-    int learningFailed = 0; // Flag to indicate learning failure
+    int current_max = 1;
+    int gen = 0, stall_count = 0;
+    float best_fitness_last = 0;
+    time_t start_time = time(NULL);
 
-    clock_t start = clock();
+    while (current_max <= MAX_TARGET) {
+        for (int i = 0; i < POPULATION_SIZE; ++i)
+            population[i].fitness = evaluate(&population[i].net, current_max);
 
-    while (!interrupted && !learningFailed) { // Continue loop if not interrupted and learning has not failed
-        Individual tournament[TOURNAMENT_SIZE];
+        for (int i = 0; i < POPULATION_SIZE - 1; ++i)
+            for (int j = i + 1; j < POPULATION_SIZE; ++j)
+                if (population[j].fitness > population[i].fitness) {
+                    Individual tmp = population[i];
+                    population[i] = population[j];
+                    population[j] = tmp;
+                }
 
-        for (int i = 0; i < POPULATION_SIZE; ++i) {
-            tournamentSelection(population, tournament);
-            crossover(tournament[0], tournament[1], &population[i]);
-            mutate(population[i].genes);
+        Individual* best = &population[0];
+
+        char outline[512] = {0};
+        char predictions[64] = {0};
+
+        for (int i = 0; i <= current_max; ++i) {
+            int input[INPUT_SIZE];
+            float output[OUTPUT_SIZE];
+            int_to_binary(i, input);
+            forward(&best->net, input, output);
+
+            int max_index = 0;
+            for (int j = 1; j <= current_max; ++j)
+                if (output[j] > output[max_index])
+                    max_index = j;
+
+            char buf[2];
+            buf[0] = 'A' + max_index;
+            buf[1] = '\0';
+            strcat(predictions, buf);
         }
 
-        evolvePopulation(population, &generation, &start, targetFitness, &learningFailed);
+        sprintf(outline, "\rRange A-%c | Generation %4d | Output: %s | Fitness: %.3f", 'A' + current_max, gen, predictions, best->fitness);
+        printf("%s", outline);
+        print_progress_bar(current_max, MAX_TARGET);
+        fflush(stdout);
+        log_generation(outline);
 
-#ifdef _WIN32
-        Sleep(1);
-#else
-        usleep(500000);
-#endif
+        if (is_perfect(&best->net, current_max)) {
+            time_t end_time = time(NULL);
+            double duration = difftime(end_time, start_time);
+            printf("\n Learned letters A-%c in %d generations. Time: %.2fs\n", 'A' + current_max, gen, duration);
+            current_max++;
+            gen = 0;
+            stall_count = 0;
+            best_fitness_last = 0;
+            learning_decay *= 0.95f;
+            start_time = time(NULL);
+            continue;
+        }
+
+        if (best->fitness <= best_fitness_last + 0.001f)
+            stall_count++;
+        else {
+            stall_count = 0;
+            best_fitness_last = best->fitness;
+        }
+
+        if (stall_count > STALL_LIMIT) {
+            printf("\n Stalled on A - %c. Resetting lower half of population.\n", 'A' + current_max);
+            reset_half_population(population);
+            stall_count = 0;
+            learning_decay *= 1.1f;
+        }
+
+        Individual new_pop[POPULATION_SIZE];
+        copy_network(&new_pop[0].net, &population[0].net);
+
+        for (int i = 1; i < POPULATION_SIZE; ++i) {
+            int p1 = rand() % TOURNAMENT_SIZE;
+            int p2 = rand() % TOURNAMENT_SIZE;
+            crossover(&new_pop[i].net, &population[p1].net, &population[p2].net);
+            mutate(&new_pop[i].net, learning_decay);
+        }
+
+        for (int i = 0; i < POPULATION_SIZE; ++i)
+            population[i] = new_pop[i];
+
+        gen++;
     }
 
-    if (interrupted) {
-        #ifdef _WIN32
-            system("cls");
-        #else
-            system("clear");
-        #endif
-        printf("\033[0;31m\rOperation Has Been Aborted!");
-        printf("\033[1;37m");
-        exit(EXIT_FAILURE);
-    }
-
-    printf("\n");
+    printf("\n Network successfully learned to classify letters A through Z!\n");
+    printf("Press Enter to exit...");
+    fflush(stdout);
+    while (getchar() != '\n');
+    getchar();
 
     return 0;
 }
